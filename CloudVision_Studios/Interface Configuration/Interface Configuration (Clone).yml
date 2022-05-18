@@ -1,0 +1,338 @@
+-
+    service: arista.studio.v1.StudioConfigService
+    method: Set
+    body:
+        value:
+            key:
+                studio_id: ee3ecf6a-6921-4e62-91ce-58e3b63c8443
+                workspace_id: ""
+            display_name: 'Interface Configuration (Clone)'
+            description: 'Configure device interfaces and interface profiles, and assign administrative state, VLANs, and other attributes.'
+            template:
+                type: TEMPLATE_TYPE_MAKO
+                body: "<%\ndebug = False\nclass baseInterface:\n  def __init__(self):\n    self.enabled = None\n    self.mode = None\n    self.accessVlan = None\n    self.desc = None\n    self.nativeVlanId = None\n    self.allowedVlans = None\n    self.phoneVlanId = None\n    self.dot1x = None\nclass interface(baseInterface):\n  def __init__(self):\n    super().__init__()\n    self.speed = None\n    self.groupNum = None\nclass channelGroup(baseInterface):\n  def __init__(self):\n    super().__init__()\n\ndef processInterface(intfName, intfCfg, profileCfg):\n  intf = interfaces.get(intfName, interface())\n  intf.enabled = intfCfg.get('enabled')\n  intf.speed = intfCfg.get('speed')\n  intf.groupNum = intfCfg.get('channelGroup')\n  accessVlan = intfCfg.get('accessVlan')\n  mode = 'access' if accessVlan else None\n  desc = intfCfg.get('description')\n  dot1x = intfCfg.get('dot1x')\n  group = None\n  if profileCfg:\n      if intf.speed == 'auto':\n          intf.speed = profileCfg.get('speed')\n      intf.groupNum = intf.groupNum or profileCfg.get('channelGroup')\n      profileMode = profileCfg.get('mode')\n      if mode == 'access':\n          assert profileMode == 'access', 'Interface %s: Access VLAN cannot be specified along with profile %s' %(intfName, profileMode)\n      else:\n          mode = profileMode\n      if mode == 'access':\n          accessVlan = accessVlan or profileCfg.get('accessVlanId')\n          assert accessVlan > 0, 'Interface %s: Access Vlan must be specified for access mode' %(intfName)\n      profileDesc = profileCfg.get('profileDescription')\n      if profileDesc:\n          if '$1' in profileDesc:\n              if not desc:\n                  raise Exception('Interface %s is missing a description, '\n                      'needed for the profile %r template' % (intfName, profileName))\n              desc = profileDesc.replace('$1', desc)\n          else:\n              desc = profileDesc\n  if intf.groupNum != None and intf.groupNum != 0:\n      group = groups.get(intf.groupNum, channelGroup())\n      group.enabled = True\n      group.mode = mode\n      group.accessVlan = accessVlan\n      group.nativeVlanId = profileCfg.get('nativeVlanId') if profileCfg else None\n      group.allowedVlans = profileCfg.get('allowedVlans') if profileCfg else None\n      group.phoneVlanId = profileCfg.get('phoneVlanId') if profileCfg else None\n      group.desc = desc\n  else:\n      intf.mode = mode\n      intf.accessVlan = accessVlan\n      intf.nativeVlanId = profileCfg.get('nativeVlanId') if profileCfg else None\n      intf.allowedVlans = profileCfg.get('allowedVlans') if profileCfg else None\n      intf.phoneVlanId = profileCfg.get('phoneVlanId') if profileCfg else None\n      intf.desc = desc\n  interfaces[intfName] = intf\n  if group:\n    groups[intf.groupNum] = group\n\nmy_device = ctx.getDevice()\ngroups = {}\ninterfaces = {}\nfor intf in my_device.getInterfaces():\n    intfName = intf.name\n    intfVal = devices.resolve().interface.resolve(intfName, strict=True)\n    if not intfVal or not intfVal.get('intfConfig'):\n        continue\n    intfCfg = intfVal['intfConfig']\n    ## Don't output config if nothing interesting is set\n    if len(intfCfg) == 0 or not intfCfg.get('enabled'):\n      continue\n    # Note: we are not using the EOS 'interface profiles' feature for now because of\n    # they make config pushes slow in certain releases (519556).\n    profileName = intfCfg.get('profile')\n    matchedProfile = None\n    if profileName:\n        matchedProfile = next((p for p in profiles if profileName == p['name']), None)\n        if not matchedProfile:\n            raise Exception('Found no matching profile \"%s\" for interface %s' % (profileName, intfName))\n    processInterface(intfName, intfCfg, matchedProfile)\n%>\\\n\n<%def name=\"makeIntfCfg(intfName, intfCfg)\">\n    <%\n      # Interface-specific settings (intfCfg) override profile settings (profileCfg)\n      # Speed is always taken from profile if not set at interface level.\n      # Description is always taken from profile, and template-substituted with interface description\n    %>\ninterface ${intfName}\n  %if intfCfg.enabled:\n    no shutdown\n  %endif\n  %if intfCfg.mode == 'access':\n    switchport mode access\n    switchport access vlan ${intfCfg.accessVlan}\n    spanning-tree portfast\n  %elif intfCfg.mode == 'trunk':\n    switchport mode trunk\n    switchport trunk native vlan ${intfCfg.nativeVlanId}\n    switchport trunk allowed vlan ${intfCfg.allowedVlans}\n  %elif intfCfg.mode == 'phone':\n    switchport mode trunk phone\n    switchport trunk native vlan ${intfCfg.nativeVlanId}\n    switchport phone vlan ${intfCfg.phoneVlanId}\n    switchport trunk allowed vlan ${intfCfg.allowedVlans}\n    ! switchport phone trunk untagged???\n  %endif\n  %if intfCfg.speed == \"auto\":\n    speed auto\n  %elif intfCfg.speed:\n    speed forced ${intfCfg.speed}\n  %endif\n  %if intfCfg.desc:\n    description ${intfCfg.desc}\n  %endif\n  % if infCfg.dot1x == \"Mac Auth\":\n    dot1x mac based authentication\n  %endif\n</%def>\\\n\n<%def name=\"makeChannelMemberCfg(intfName, intfCfg)\">\n    <%\n      # Simple config for a port channel member interface\n    %>\ninterface ${intfName}\n  %if intfCfg.enabled:\n    no shutdown\n  %endif\n    channel-group ${intfCfg.groupNum} mode active\n</%def>\\\n\n<%def name=\"makeChannelGroupCfg(groupNum, groupCfg)\">\n    <%\n      # config for the port channel interfaces\n    %>\ninterface Port-Channel ${groupNum}\n  %if groupCfg.enabled:\n    no shutdown\n  %endif\n  %if groupCfg.mode == 'access':\n    switchport mode access\n    switchport access vlan ${groupCfg.accessVlan}\n    spanning-tree portfast\n  %elif groupCfg.mode == 'trunk':\n    switchport mode trunk\n    switchport trunk native vlan ${groupCfg.nativeVlanId}\n    switchport trunk allowed vlan ${groupCfg.allowedVlans}\n  %elif groupCfg.mode == 'phone':\n    switchport mode trunk phone\n    switchport trunk native vlan ${groupCfg.nativeVlanId}\n    switchport phone vlan ${groupCfg.phoneVlanId}\n    switchport trunk allowed vlan ${groupCfg.allowedVlans}\n    ! switchport phone trunk untagged???\n  %endif\n  %if groupCfg.desc:\n    description ${groupCfg.desc}\n  %endif\n</%def>\\\n\n% for intfName, intfCfg in sorted(interfaces.items()):\n% if intfCfg.groupNum and intfCfg.groupNum > 0:\n${makeChannelMemberCfg(intfName, intfCfg)}\n% else:\n${makeIntfCfg(intfName, intfCfg)}\n% endif\n\n%if debug:\n% for name, intf in interfaces.items():\nintf: ${name}, ${vars(intf).items()}\n% endfor\n% for num, group in groups.items():\ngroup: ${num}, ${vars(group).items()}\n% endfor\n%endif\n% endfor\n\n% for groupNum, groupCfg in sorted(groups.items()):\n${makeChannelGroupCfg(groupNum, groupCfg)}\n% endfor\n"
+            input_schema:
+                fields:
+                    values:
+                        enabled:
+                            id: enabled
+                            name: enabled
+                            label: Enabled
+                            description: 'Enable or disable the interface for adminstration'
+                            required: false
+                            type: INPUT_FIELD_TYPE_BOOLEAN
+                            boolean_props:
+                                default_value: false
+                        description:
+                            id: description
+                            name: description
+                            label: Description
+                            description: 'Enter a port description string (max. 30 characters)'
+                            required: false
+                            type: INPUT_FIELD_TYPE_STRING
+                            string_props:
+                                default_value: null
+                                static_options: null
+                                format: null
+                                length: null
+                                pattern: null
+                                dynamic_options: null
+                        accessVlan:
+                            id: accessVlan
+                            name: accessVlan
+                            label: 'Access VLAN ID'
+                            description: 'VLAN ID for this port'
+                            required: false
+                            type: INPUT_FIELD_TYPE_INTEGER
+                            integer_props:
+                                default_value: '0'
+                                range: 0..4094
+                                static_options: null
+                                dynamic_options: null
+                        speed:
+                            id: speed
+                            name: speed
+                            label: 'Interface Speed'
+                            description: 'Set the interface speed'
+                            required: false
+                            type: INPUT_FIELD_TYPE_STRING
+                            string_props:
+                                default_value: auto
+                                static_options:
+                                    values:
+                                        - auto
+                                        - 10half
+                                        - 10full
+                                        - 100full
+                                        - 1gfull
+                                        - 10gfull
+                                        - 25gfull
+                                        - 40gfull
+                                        - 100gfull
+                                format: null
+                                length: null
+                                pattern: null
+                                dynamic_options: null
+                        profile:
+                            id: profile
+                            name: profile
+                            label: Profile
+                            description: 'Assign an interface profile that you''ve created to this device interface'
+                            required: false
+                            type: INPUT_FIELD_TYPE_STRING
+                            string_props:
+                                default_value: null
+                                static_options: null
+                                format: null
+                                length: null
+                                pattern: null
+                                dynamic_options:
+                                    values:
+                                        - '{"fieldId":"profileName"}'
+                        channelGroup:
+                            id: channelGroup
+                            name: channelGroup
+                            label: 'Port-Channel Group'
+                            description: 'The Port-Channel ID if this interface is in a Link Aggregation Group (LAG)'
+                            required: false
+                            type: INPUT_FIELD_TYPE_INTEGER
+                            integer_props:
+                                default_value: null
+                                range: 0..999999
+                                static_options: null
+                                dynamic_options: null
+                        4abf78a5-9a8e-4431-b20b-6589dbd03ed4:
+                            id: 4abf78a5-9a8e-4431-b20b-6589dbd03ed4
+                            name: dot1x
+                            label: dot1x
+                            description: ""
+                            required: false
+                            type: INPUT_FIELD_TYPE_STRING
+                            string_props:
+                                default_value: null
+                                static_options:
+                                    values:
+                                        - 'Mac Auth'
+                                        - 'User Auth'
+                                format: null
+                                length: null
+                                pattern: null
+                                dynamic_options: null
+                        intfConfig:
+                            id: intfConfig
+                            name: intfConfig
+                            label: 'Interface specific configuration'
+                            description: ""
+                            required: false
+                            type: INPUT_FIELD_TYPE_GROUP
+                            group_props:
+                                members:
+                                    values:
+                                        - enabled
+                                        - description
+                                        - accessVlan
+                                        - speed
+                                        - profile
+                                        - channelGroup
+                                        - 4abf78a5-9a8e-4431-b20b-6589dbd03ed4
+                        interface:
+                            id: interface
+                            name: interface
+                            label: Interface
+                            description: ""
+                            required: false
+                            type: INPUT_FIELD_TYPE_RESOLVER
+                            resolver_props:
+                                base_field_id: intfConfig
+                                display_mode: RESOLVER_FIELD_DISPLAY_MODE_ALL
+                                input_mode: RESOLVER_FIELD_INPUT_MODE_SINGLE_INTERFACE_TAG
+                                input_tag_label: interface
+                                tag_filter_query: null
+                        devices:
+                            id: devices
+                            name: devices
+                            label: Device
+                            description: 'Select a device to configure its interfaces and to assign a profile.'
+                            required: false
+                            type: INPUT_FIELD_TYPE_RESOLVER
+                            resolver_props:
+                                base_field_id: interface
+                                display_mode: RESOLVER_FIELD_DISPLAY_MODE_ALL
+                                input_mode: RESOLVER_FIELD_INPUT_MODE_SINGLE_DEVICE_TAG
+                                input_tag_label: device
+                                tag_filter_query: null
+                        profileName:
+                            id: profileName
+                            name: name
+                            label: Name
+                            description: ""
+                            required: false
+                            type: INPUT_FIELD_TYPE_STRING
+                            string_props:
+                                default_value: null
+                                static_options: null
+                                format: null
+                                length: null
+                                pattern: null
+                                dynamic_options: null
+                        profileDescription:
+                            id: profileDescription
+                            name: profileDescription
+                            label: 'Profile Description'
+                            description: 'Create a description for this profile, and entering "$1" will add the device interface description when applied to a device.'
+                            required: false
+                            type: INPUT_FIELD_TYPE_STRING
+                            string_props:
+                                default_value: null
+                                static_options: null
+                                format: null
+                                length: null
+                                pattern: null
+                                dynamic_options: null
+                        profileSpeed:
+                            id: profileSpeed
+                            name: speed
+                            label: Speed
+                            description: 'Set the speed of the interface.'
+                            required: false
+                            type: INPUT_FIELD_TYPE_STRING
+                            string_props:
+                                default_value: auto
+                                static_options:
+                                    values:
+                                        - auto
+                                        - 10half
+                                        - 10full
+                                        - 100full
+                                        - 1gfull
+                                        - 10gfull
+                                        - 25gfull
+                                        - 40gfull
+                                        - 100gfull
+                                format: null
+                                length: null
+                                pattern: null
+                                dynamic_options: null
+                        mode:
+                            id: mode
+                            name: mode
+                            label: Mode
+                            description: 'Set this as a VLAN access interface, as a trunk interface, or as a phone interface for VLAN unaware IP phones.'
+                            required: false
+                            type: INPUT_FIELD_TYPE_STRING
+                            string_props:
+                                default_value: access
+                                static_options:
+                                    values:
+                                        - access
+                                        - trunk
+                                        - phone
+                                format: null
+                                length: null
+                                pattern: null
+                                dynamic_options: null
+                        accessVlanId:
+                            id: accessVlanId
+                            name: accessVlanId
+                            label: 'Access VLAN ID'
+                            description: ""
+                            required: false
+                            type: INPUT_FIELD_TYPE_INTEGER
+                            integer_props:
+                                default_value: '0'
+                                range: 0..4094
+                                static_options: null
+                                dynamic_options: null
+                        nativeVlanId:
+                            id: nativeVlanId
+                            name: nativeVlanId
+                            label: 'Native VLAN ID'
+                            description: 'Assign a VLAN that untagged traffic arriving on this trunk will be tagged with.'
+                            required: false
+                            type: INPUT_FIELD_TYPE_INTEGER
+                            integer_props:
+                                default_value: '0'
+                                range: 0..4094
+                                static_options: null
+                                dynamic_options: null
+                        phoneVlanId:
+                            id: phoneVlanId
+                            name: phoneVlanId
+                            label: 'Phone VLAN ID'
+                            description: 'VoIP VLAN that enables LLDP-based classification of IP phones using the Type 7 System Capabilities TLV.'
+                            required: false
+                            type: INPUT_FIELD_TYPE_INTEGER
+                            integer_props:
+                                default_value: '0'
+                                range: 0..4094
+                                static_options: null
+                                dynamic_options: null
+                        allowedVlans:
+                            id: allowedVlans
+                            name: allowedVlans
+                            label: 'Allowed VLANs'
+                            description: 'List the VLAN IDs that this trunk can carry, separating values with a comma and including continuous values with a hyphen (e.g. 4, 10-16, 100).'
+                            required: false
+                            type: INPUT_FIELD_TYPE_STRING
+                            string_props:
+                                default_value: null
+                                static_options: null
+                                format: null
+                                length: null
+                                pattern: null
+                                dynamic_options: null
+                        profileChannelGroup:
+                            id: profileChannelGroup
+                            name: channelGroup
+                            label: 'Port Channel Group'
+                            description: 'The Port Channel ID if this interface is in a Link Aggregation Group (LAG)'
+                            required: false
+                            type: INPUT_FIELD_TYPE_INTEGER
+                            integer_props:
+                                default_value: null
+                                range: 0..999999
+                                static_options: null
+                                dynamic_options: null
+                        profileValue:
+                            id: profileValue
+                            name: value
+                            label: 'Profiles Group'
+                            description: 'Group of members for Profiles'
+                            required: false
+                            type: INPUT_FIELD_TYPE_GROUP
+                            group_props:
+                                members:
+                                    values:
+                                        - profileName
+                                        - profileDescription
+                                        - profileSpeed
+                                        - mode
+                                        - accessVlanId
+                                        - nativeVlanId
+                                        - phoneVlanId
+                                        - allowedVlans
+                                        - profileChannelGroup
+                        profiles:
+                            id: profiles
+                            name: profiles
+                            label: Profile
+                            description: 'Create or edit profiles to share interface attributes across devices.'
+                            required: false
+                            type: INPUT_FIELD_TYPE_COLLECTION
+                            collection_props:
+                                base_field_id: profileValue
+                                key: profileName
+                        root:
+                            id: root
+                            name: ""
+                            label: ""
+                            description: ""
+                            required: false
+                            type: INPUT_FIELD_TYPE_GROUP
+                            group_props:
+                                members:
+                                    values:
+                                        - devices
+                                        - profiles
+                layout:
+                    value: '{"accessVlanId":{"key":"accessVlanId","dependency":{"mode":{"value":["access"],"mode":"SHOW"}},"type":"INPUT"},"nativeVlanId":{"key":"nativeVlanId","dependency":{"mode":{"value":["trunk","phone"],"mode":"SHOW"}},"type":"INPUT"},"allowedVlans":{"key":"allowedVlans","dependency":{"mode":{"value":["trunk","phone"],"mode":"SHOW"}},"type":"INPUT"},"phoneVlanId":{"key":"phoneVlanId","dependency":{"mode":{"value":["phone"],"mode":"SHOW"}},"type":"INPUT"},"intfConfig":{"key":"intfConfig","type":"INPUT","order":["enabled","profile","description","accessVlan","speed","channelGroup","4abf78a5-9a8e-4431-b20b-6589dbd03ed4"]},"profiles":{"key":"profiles","type":"INPUT","isPageLayout":true}}'
